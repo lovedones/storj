@@ -8,6 +8,8 @@ package satellitedb
 import (
 	"context"
 	"crypto"
+	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -560,6 +562,9 @@ type lockedStatDB struct {
 // Create adds a new stats entry for node.
 func (m *lockedStatDB) Create(ctx context.Context, nodeID storj.NodeID, initial *statdb.NodeStats) (stats *statdb.NodeStats, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB Create locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB Create unlocked")
 	defer m.Unlock()
 	return m.db.Create(ctx, nodeID, initial)
 }
@@ -567,6 +572,9 @@ func (m *lockedStatDB) Create(ctx context.Context, nodeID storj.NodeID, initial 
 // CreateEntryIfNotExists creates a node stats entry if it didn't already exist.
 func (m *lockedStatDB) CreateEntryIfNotExists(ctx context.Context, nodeID storj.NodeID) (stats *statdb.NodeStats, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB CreateEntryIfNotExists locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB CreateEntryIfNotExists unlocked")
 	defer m.Unlock()
 	return m.db.CreateEntryIfNotExists(ctx, nodeID)
 }
@@ -574,6 +582,9 @@ func (m *lockedStatDB) CreateEntryIfNotExists(ctx context.Context, nodeID storj.
 // FindInvalidNodes finds a subset of storagenodes that have stats below provided reputation requirements.
 func (m *lockedStatDB) FindInvalidNodes(ctx context.Context, nodeIDs storj.NodeIDList, maxStats *statdb.NodeStats) (invalid storj.NodeIDList, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB FindInvalidNodes locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB FindInValidNodes unlocked")
 	defer m.Unlock()
 	return m.db.FindInvalidNodes(ctx, nodeIDs, maxStats)
 }
@@ -581,6 +592,9 @@ func (m *lockedStatDB) FindInvalidNodes(ctx context.Context, nodeIDs storj.NodeI
 // Get returns node stats.
 func (m *lockedStatDB) Get(ctx context.Context, nodeID storj.NodeID) (stats *statdb.NodeStats, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB Get locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB Get unlocked")
 	defer m.Unlock()
 	return m.db.Get(ctx, nodeID)
 }
@@ -588,6 +602,9 @@ func (m *lockedStatDB) Get(ctx context.Context, nodeID storj.NodeID) (stats *sta
 // Update all parts of single storagenode's stats.
 func (m *lockedStatDB) Update(ctx context.Context, request *statdb.UpdateRequest) (stats *statdb.NodeStats, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB Update locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB Update unlocked")
 	defer m.Unlock()
 	return m.db.Update(ctx, request)
 }
@@ -595,6 +612,9 @@ func (m *lockedStatDB) Update(ctx context.Context, request *statdb.UpdateRequest
 // UpdateAuditSuccess updates a single storagenode's audit stats.
 func (m *lockedStatDB) UpdateAuditSuccess(ctx context.Context, nodeID storj.NodeID, auditSuccess bool) (stats *statdb.NodeStats, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB UpdateAuditSuccess locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB UpdateAuditSuccess unlocked")
 	defer m.Unlock()
 	return m.db.UpdateAuditSuccess(ctx, nodeID, auditSuccess)
 }
@@ -602,6 +622,9 @@ func (m *lockedStatDB) UpdateAuditSuccess(ctx context.Context, nodeID storj.Node
 // UpdateBatch for updating multiple storage nodes' stats.
 func (m *lockedStatDB) UpdateBatch(ctx context.Context, requests []*statdb.UpdateRequest) (statslist []*statdb.NodeStats, failed []*statdb.UpdateRequest, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB UpdateBatch locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB UpdateBatch unlocked")
 	defer m.Unlock()
 	return m.db.UpdateBatch(ctx, requests)
 }
@@ -609,6 +632,9 @@ func (m *lockedStatDB) UpdateBatch(ctx context.Context, requests []*statdb.Updat
 // UpdateUptime updates a single storagenode's uptime stats.
 func (m *lockedStatDB) UpdateUptime(ctx context.Context, nodeID storj.NodeID, isUp bool) (stats *statdb.NodeStats, err error) {
 	m.Lock()
+	log.Printf("lockedStatDB UpdateUptime locked")
+	debug.PrintStack()
+	defer log.Printf("lockedStatDB UpdateUptime unlocked")
 	defer m.Unlock()
 	return m.db.UpdateUptime(ctx, nodeID, isUp)
 }
