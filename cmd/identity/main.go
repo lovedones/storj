@@ -204,7 +204,7 @@ func printExtensions(cert []byte, exts []pkix.Extension) error {
 	for _, e := range exts {
 		var data interface{}
 		switch e.Id.String() {
-		case peertls.ExtensionIDs[peertls.RevocationExtID].String():
+		case peertls.RevocationExtID.String():
 			var rev peertls.Revocation
 			if err := rev.Unmarshal(e.Value); err != nil {
 				return err

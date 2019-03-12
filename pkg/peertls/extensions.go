@@ -4,29 +4,18 @@
 package peertls
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"encoding/binary"
-	"encoding/gob"
-	"time"
-
 	"github.com/zeebo/errs"
 
 	"storj.io/storj/pkg/pkcrypto"
 )
 
 const (
-	// SignedCertExtID is the asn1 object ID for a pkix extensionHandler holding a
-	// signature of the cert it's extending, signed by some CA (e.g. the root cert chain).
-	// This extensionHandler allows for an additional signature per certificate.
-	SignedCertExtID = iota
-	// RevocationExtID is the asn1 object ID for a pkix extensionHandler containing the
-	// most recent certificate revocation data
-	// for the current TLS cert chain.
-	RevocationExtID
+	//SignedCertExtID = iota
+	//RevocationExtID
 	// RevocationBucket is the bolt bucket to store revocation data in
 	RevocationBucket = "revocations"
 )
@@ -39,135 +28,74 @@ const (
 )
 
 var (
-	// ExtensionIDs is a map from an enum to object identifiers used in peertls extensions.
-	ExtensionIDs = map[int]asn1.ObjectIdentifier{
-		// NB: 2.999.X is reserved for "example" OIDs
-		// (see http://oid-info.com/get/2.999)
-		SignedCertExtID: {2, 999, 1, 1},
-		RevocationExtID: {2, 999, 1, 2},
+	AvailableExtensionHandlers = &ExtensionHandlers{
+		handlers: []ExtensionHandler{},
 	}
+
+	// NB: 2.999.X is reserved for "example" OIDs
+	// (see http://oid-info.com/get/2.999)
+	// 2.999.1.X -- storj general/misc. extensions
+
+	// SignedCertExtID is the asn1 object ID for a pkix extensionHandler holding a
+	// signature of the cert it's extending, signed by some CA (e.g. the root cert chain).
+	// This extensionHandler allows for an additional signature per certificate.
+	SignedCertExtID = asn1.ObjectIdentifier{2, 999, 1, 1}
+	// RevocationExtID is the asn1 object ID for a pkix extensionHandler containing the
+	// most recent certificate revocation data
+	// for the current TLS cert chain.
+	RevocationExtID = asn1.ObjectIdentifier{2, 999, 1, 2}
+
+	CAWhitelistSignedLeafExtensionHandler = &GenericExtensionHandler{
+		oid:         &SignedCertExtID,
+		newVerifier: caWhitelistSignedLeafVerifier,
+	}
+
 	// ErrExtension is used when an error occurs while processing an extensionHandler.
 	ErrExtension = errs.Class("extension error")
-	// ErrRevocation is used when an error occurs involving a certificate revocation
-	ErrRevocation = errs.Class("revocation processing error")
-	// ErrRevocationDB is used when an error occurs involving the revocations database
-	ErrRevocationDB = errs.Class("revocation database error")
-	// ErrRevokedCert is used when a certificate in the chain is revoked and not expected to be
-	ErrRevokedCert = ErrRevocation.New("a certificate in the chain is revoked")
+
 	// ErrUniqueExtensions is used when multiple extensions have the same Id
 	ErrUniqueExtensions = ErrExtension.New("extensions are not unique")
-	// ErrRevocationTimestamp is used when a revocation's timestamp is older than the last recorded revocation
-	ErrRevocationTimestamp = ErrExtension.New("revocation timestamp is older than last known revocation")
+
 )
 
 // TLSExtConfig is used to bind cli flags for determining which extensions will
 // be used by the server
 type TLSExtConfig struct {
-	Revocation          bool `help:"if true, client leaves may contain the most recent certificate revocation for the current certificate" default:"true"`
-	WhitelistSignedLeaf bool `help:"if true, client leaves must contain a valid \"signed certificate extension\" (NB: verified against certs in the peer ca whitelist; i.e. if true, a whitelist must be provided)" default:"false"`
+	Revocation          bool   `default:"true" help:"if true, client leaves may contain the most recent certificate revocation for the current certificate"`
+	WhitelistSignedLeaf bool   `default:"false" help:"if true, client leaves must contain a valid \"signed certificate extension\" (NB: verified against certs in the peer ca whitelist; i.e. if true, a whitelist must be provided)"`
+}
+
+// ExtensionOptions holds options for use in handling extensions
+type ExtensionOptions struct {
+	PeerCAWhitelist []*x509.Certificate
+	RevDB           RevocationDB
 }
 
 // ExtensionHandlers is a collection of `extensionHandler`s for convenience (see `VerifyFunc`)
-type ExtensionHandlers []ExtensionHandler
+type ExtensionHandlers struct {
+	handlers []ExtensionHandler
+}
 
-type extensionVerificationFunc func(pkix.Extension, [][]*x509.Certificate) error
+type ExtensionVerificationFunc func(pkix.Extension, [][]*x509.Certificate) error
 
 // ExtensionHandler represents a verify function for handling an extension
 // with the given ID
-type ExtensionHandler struct {
-	ID     asn1.ObjectIdentifier
-	Verify extensionVerificationFunc
+type ExtensionHandler interface {
+	OID() *asn1.ObjectIdentifier
+	NewVerifier(options ExtensionOptions) ExtensionVerificationFunc
 }
 
-// ParseExtOptions holds options for calling `ParseExtensions`
-type ParseExtOptions struct {
-	CAWhitelist []*x509.Certificate
-	RevDB       RevocationDB
+type GenericExtensionHandler struct {
+	oid         *asn1.ObjectIdentifier
+	newVerifier func(options ExtensionOptions) ExtensionVerificationFunc
 }
 
-// Revocation represents a certificate revocation for storage in the revocation
-// database and for use in a TLS extension
-type Revocation struct {
-	Timestamp int64
-	CertHash  []byte
-	Signature []byte
-}
-
-// RevocationDB stores certificate revocation data.
-type RevocationDB interface {
-	Get(chain []*x509.Certificate) (*Revocation, error)
-	Put(chain []*x509.Certificate, ext pkix.Extension) error
-	List() ([]*Revocation, error)
-	Close() error
-}
-
-// ParseExtensions parses an extension config into a slice of extension handlers
-// with their respective ids (`asn1.ObjectIdentifier`) and a "verify" function
-// to be used in the context of peer certificate verification.
-func ParseExtensions(c TLSExtConfig, opts ParseExtOptions) (handlers ExtensionHandlers) {
-	if c.WhitelistSignedLeaf {
-		handlers = append(handlers, ExtensionHandler{
-			ID:     ExtensionIDs[SignedCertExtID],
-			Verify: verifyCAWhitelistSignedLeafFunc(opts.CAWhitelist),
-		})
-	}
-
-	if c.Revocation {
-		handlers = append(handlers, ExtensionHandler{
-			ID: ExtensionIDs[RevocationExtID],
-			Verify: func(certExt pkix.Extension, chains [][]*x509.Certificate) error {
-				if err := opts.RevDB.Put(chains[0], certExt); err != nil {
-					return err
-				}
-				return nil
-			},
-		})
-	}
-
-	return handlers
-}
-
-// NewRevocationExt generates a revocation extension for a certificate.
-func NewRevocationExt(key crypto.PrivateKey, revokedCert *x509.Certificate) (pkix.Extension, error) {
-	nowUnix := time.Now().Unix()
-
-	hash := pkcrypto.SHA256Hash(revokedCert.Raw)
-	rev := Revocation{
-		Timestamp: nowUnix,
-		CertHash:  make([]byte, len(hash)),
-	}
-	copy(rev.CertHash, hash)
-
-	if err := rev.Sign(key); err != nil {
-		return pkix.Extension{}, err
-	}
-
-	revBytes, err := rev.Marshal()
-	if err != nil {
-		return pkix.Extension{}, err
-	}
-
-	ext := pkix.Extension{
-		Id:    ExtensionIDs[RevocationExtID],
-		Value: make([]byte, len(revBytes)),
-	}
-	copy(ext.Value, revBytes)
-
-	return ext, nil
-}
-
-// AddRevocationExt generates a revocation extension for a cert and attaches it
-// to the cert which will replace the revoked cert.
-func AddRevocationExt(key crypto.PrivateKey, revokedCert, newCert *x509.Certificate) error {
-	ext, err := NewRevocationExt(key, revokedCert)
-	if err != nil {
-		return err
-	}
-	err = AddExtension(newCert, ext)
-	if err != nil {
-		return err
-	}
-	return nil
+func init() {
+	AvailableExtensionHandlers.Register(
+		CAWhitelistSignedLeafExtensionHandler,
+		RevocationCheckExtensionHandler,
+		RevocationUpdateExtensionHandler,
+	)
 }
 
 // AddSignedCertExt generates a signed certificate extension for a cert and attaches
@@ -179,7 +107,7 @@ func AddSignedCertExt(key crypto.PrivateKey, cert *x509.Certificate) error {
 	}
 
 	err = AddExtension(cert, pkix.Extension{
-		Id:    ExtensionIDs[SignedCertExtID],
+		Id:    SignedCertExtID,
 		Value: signature,
 	})
 	if err != nil {
@@ -205,24 +133,37 @@ func AddExtension(cert *x509.Certificate, exts ...pkix.Extension) (err error) {
 	return nil
 }
 
+// Register adds an extension handler to the list of extension handlers.
+func (extHandlers *ExtensionHandlers) Register(handlers ...ExtensionHandler) {
+	extHandlers.handlers = append(extHandlers.handlers, handlers...)
+}
+
 // VerifyFunc returns a peer certificate verification function which iterates
 // over all the leaf cert's extensions and receiver extensions and calls
-// `extensionHandler#verify` when it finds a match by id (`asn1.ObjectIdentifier`)
-func (e ExtensionHandlers) VerifyFunc() PeerCertVerificationFunc {
-	if len(e) == 0 {
+// `extensionHandler#verify` when it finds a match by id (`asn1.ObjectIdentifier`).
+func (extHandlers ExtensionHandlers) VerifyFunc(opts ExtensionOptions) PeerCertVerificationFunc {
+	if len(extHandlers.handlers) == 0 {
 		return nil
 	}
-	return func(_ [][]byte, parsedChains [][]*x509.Certificate) error {
-		leafExts := make(map[string]pkix.Extension)
-		for _, ext := range parsedChains[0][LeafIndex].ExtraExtensions {
-			leafExts[ext.Id.String()] = ext
-		}
 
-		for _, handler := range e {
-			if ext, ok := leafExts[handler.ID.String()]; ok {
-				err := handler.Verify(ext, parsedChains)
-				if err != nil {
-					return ErrExtension.Wrap(err)
+	verifiers := make(map[*asn1.ObjectIdentifier]ExtensionVerificationFunc)
+	for _, handler := range extHandlers.handlers {
+		verifiers[handler.OID()] = handler.NewVerifier(opts)
+	}
+
+	return func(_ [][]byte, parsedChains [][]*x509.Certificate) error {
+		for _, cert := range parsedChains[0] {
+			exts := make(map[string]pkix.Extension)
+			for _, ext := range cert.ExtraExtensions {
+				exts[ext.Id.String()] = ext
+			}
+
+			for oid, verify := range verifiers {
+				if ext, ok := exts[oid.String()]; ok {
+					err := verify(ext, parsedChains)
+					if err != nil {
+						return ErrExtension.Wrap(err)
+					}
 				}
 			}
 		}
@@ -230,73 +171,23 @@ func (e ExtensionHandlers) VerifyFunc() PeerCertVerificationFunc {
 	}
 }
 
-// Verify checks if the signature of the revocation was produced by the passed cert's public key.
-func (r Revocation) Verify(signingCert *x509.Certificate) error {
-	pubKey, ok := signingCert.PublicKey.(crypto.PublicKey)
-	if !ok {
-		return pkcrypto.ErrUnsupportedKey.New("%T", signingCert.PublicKey)
-	}
-
-	data := r.TBSBytes()
-	if err := pkcrypto.HashAndVerifySignature(pubKey, data, r.Signature); err != nil {
-		return err
-	}
-	return nil
+func (geh *GenericExtensionHandler) OID() *asn1.ObjectIdentifier {
+	return geh.oid
 }
 
-// TBSBytes (ToBeSigned) returns the hash of the revoked certificate hash and
-// the timestamp (i.e. hash(hash(cert bytes) + timestamp)).
-func (r *Revocation) TBSBytes() []byte {
-	var tsBytes [binary.MaxVarintLen64]byte
-	binary.PutVarint(tsBytes[:], r.Timestamp)
-	toHash := append(append([]byte{}, r.CertHash...), tsBytes[:]...)
-
-	return pkcrypto.SHA256Hash(toHash)
+func (geh *GenericExtensionHandler) NewVerifier(opts ExtensionOptions) ExtensionVerificationFunc {
+	return geh.newVerifier(opts)
 }
 
-// Sign generates a signature using the passed key and attaches it to the revocation.
-func (r *Revocation) Sign(key crypto.PrivateKey) error {
-	data := r.TBSBytes()
-	sig, err := pkcrypto.HashAndSign(key, data)
-	if err != nil {
-		return err
-	}
-	r.Signature = sig
-	return nil
-}
-
-// Marshal serializes a revocation to bytes
-func (r Revocation) Marshal() ([]byte, error) {
-	data := new(bytes.Buffer)
-	// NB: using gob instead of asn1 because we plan to leave tls and asn1 is meh
-	encoder := gob.NewEncoder(data)
-	err := encoder.Encode(r)
-	if err != nil {
-		return nil, err
-	}
-
-	return data.Bytes(), nil
-}
-
-// Unmarshal deserializes a revocation from bytes
-func (r *Revocation) Unmarshal(data []byte) error {
-	// NB: using gob instead of asn1 because we plan to leave tls and asn1 is meh
-	decoder := gob.NewDecoder(bytes.NewBuffer(data))
-	if err := decoder.Decode(r); err != nil {
-		return err
-	}
-	return nil
-}
-
-func verifyCAWhitelistSignedLeafFunc(caWhitelist []*x509.Certificate) extensionVerificationFunc {
-	return func(certExt pkix.Extension, chains [][]*x509.Certificate) error {
-		if caWhitelist == nil {
+func caWhitelistSignedLeafVerifier(opts ExtensionOptions) ExtensionVerificationFunc {
+	return func(ext pkix.Extension, chains [][]*x509.Certificate) error {
+		if opts.PeerCAWhitelist == nil {
 			return ErrVerifyCAWhitelist.New("no whitelist provided")
 		}
 
 		leaf := chains[0][LeafIndex]
-		for _, ca := range caWhitelist {
-			err := pkcrypto.HashAndVerifySignature(ca.PublicKey, leaf.RawTBSCertificate, certExt.Value)
+		for _, ca := range opts.PeerCAWhitelist {
+			err := pkcrypto.HashAndVerifySignature(ca.PublicKey, leaf.RawTBSCertificate, ext.Value)
 			if err == nil {
 				return nil
 			}
@@ -304,3 +195,4 @@ func verifyCAWhitelistSignedLeafFunc(caWhitelist []*x509.Certificate) extensionV
 		return ErrVerifyCAWhitelist.New("leaf extension")
 	}
 }
+

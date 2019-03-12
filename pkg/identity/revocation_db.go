@@ -4,7 +4,6 @@
 package identity
 
 import (
-	"bytes"
 	"crypto/x509"
 	"crypto/x509/pkix"
 
@@ -20,6 +19,54 @@ import (
 // the most recently seen revocation).
 type RevocationDB struct {
 	DB storage.KeyValueStore
+}
+
+// NewRevDB returns a new revocation database given the URL
+func NewRevDB(revocationDBURL string) (*RevocationDB, error) {
+	driver, source, err := dbutil.SplitConnstr(revocationDBURL)
+	if err != nil {
+		return nil, peertls.ErrRevocationDB.Wrap(err)
+	}
+
+	var db *RevocationDB
+	switch driver {
+	case "bolt":
+		db, err = NewRevocationDBBolt(source)
+		if err != nil {
+			return nil, peertls.ErrRevocationDB.Wrap(err)
+		}
+	case "redis":
+		db, err = NewRevocationDBRedis(revocationDBURL)
+		if err != nil {
+			return nil, peertls.ErrRevocationDB.Wrap(err)
+		}
+	default:
+		return nil, peertls.ErrRevocationDB.New("database scheme not supported: %s", driver)
+	}
+
+	return db, nil
+}
+
+// NewRevocationDBBolt creates a bolt-backed RevocationDB
+func NewRevocationDBBolt(path string) (*RevocationDB, error) {
+	client, err := boltdb.New(path, peertls.RevocationBucket)
+	if err != nil {
+		return nil, err
+	}
+	return &RevocationDB{
+		DB: client,
+	}, nil
+}
+
+// NewRevocationDBRedis creates a redis-backed RevocationDB.
+func NewRevocationDBRedis(address string) (*RevocationDB, error) {
+	client, err := redis.NewClientFrom(address)
+	if err != nil {
+		return nil, err
+	}
+	return &RevocationDB{
+		DB: client,
+	}, nil
 }
 
 // Get attempts to retrieve the most recent revocation for the given cert chain
@@ -105,79 +152,4 @@ func (r RevocationDB) List() (revs []*peertls.Revocation, err error) {
 // Close closes the underlying store
 func (r RevocationDB) Close() error {
 	return r.DB.Close()
-}
-
-// NewRevDB returns a new revocation database given the URL
-func NewRevDB(revocationDBURL string) (*RevocationDB, error) {
-	driver, source, err := dbutil.SplitConnstr(revocationDBURL)
-	if err != nil {
-		return nil, peertls.ErrRevocationDB.Wrap(err)
-	}
-
-	var db *RevocationDB
-	switch driver {
-	case "bolt":
-		db, err = NewRevocationDBBolt(source)
-		if err != nil {
-			return nil, peertls.ErrRevocationDB.Wrap(err)
-		}
-	case "redis":
-		db, err = NewRevocationDBRedis(revocationDBURL)
-		if err != nil {
-			return nil, peertls.ErrRevocationDB.Wrap(err)
-		}
-	default:
-		return nil, peertls.ErrRevocationDB.New("database scheme not supported: %s", driver)
-	}
-
-	return db, nil
-}
-
-// NewRevocationDBBolt creates a bolt-backed RevocationDB
-func NewRevocationDBBolt(path string) (*RevocationDB, error) {
-	client, err := boltdb.New(path, peertls.RevocationBucket)
-	if err != nil {
-		return nil, err
-	}
-	return &RevocationDB{
-		DB: client,
-	}, nil
-}
-
-// NewRevocationDBRedis creates a redis-backed RevocationDB.
-func NewRevocationDBRedis(address string) (*RevocationDB, error) {
-	client, err := redis.NewClientFrom(address)
-	if err != nil {
-		return nil, err
-	}
-	return &RevocationDB{
-		DB: client,
-	}, nil
-}
-
-// VerifyUnrevokedChainFunc returns a peer certificate verification function which
-// returns an error if the incoming cert chain contains a revoked CA or leaf.
-func VerifyUnrevokedChainFunc(revDB *RevocationDB) peertls.PeerCertVerificationFunc {
-	return func(_ [][]byte, chains [][]*x509.Certificate) error {
-		leaf := chains[0][peertls.LeafIndex]
-		ca := chains[0][peertls.CAIndex]
-		lastRev, lastRevErr := revDB.Get(chains[0])
-		if lastRevErr != nil {
-			return peertls.ErrExtension.Wrap(lastRevErr)
-		}
-		if lastRev == nil {
-			return nil
-		}
-
-		// NB: we trust that anything that made it into the revocation DB is valid
-		//		(i.e. no need for further verification)
-		switch {
-		case bytes.Equal(lastRev.CertHash, ca.Raw):
-			fallthrough
-		case bytes.Equal(lastRev.CertHash, leaf.Raw):
-			return peertls.ErrRevokedCert
-		default:
-			return nil
-		}
-	}
 }

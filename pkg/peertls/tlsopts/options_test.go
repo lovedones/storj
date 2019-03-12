@@ -21,6 +21,7 @@ import (
 )
 
 func TestNewOptions(t *testing.T) {
+	// TODO: this is not a great test...
 	ctx := testcontext.New(t)
 	defer ctx.Cleanup()
 

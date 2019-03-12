@@ -5,6 +5,7 @@ package tlsopts
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"io/ioutil"
 
 	"github.com/zeebo/errs"
@@ -26,6 +27,7 @@ type Options struct {
 	Config            Config
 	Ident             *identity.FullIdentity
 	RevDB             *identity.RevocationDB
+	PeerCAWhitelist   []*x509.Certificate
 	VerificationFuncs *VerificationFuncs
 	Cert              *tls.Certificate
 }
@@ -45,7 +47,7 @@ func NewOptions(i *identity.FullIdentity, c Config) (*Options, error) {
 		VerificationFuncs: new(VerificationFuncs),
 	}
 
-	err := opts.configure(c)
+	err := opts.configure()
 	if err != nil {
 		return nil, err
 	}
@@ -53,37 +55,40 @@ func NewOptions(i *identity.FullIdentity, c Config) (*Options, error) {
 	return opts, nil
 }
 
+func (opts *Options) ExtensionOptions() peertls.ExtensionOptions {
+	return peertls.ExtensionOptions{
+		PeerCAWhitelist: opts.PeerCAWhitelist,
+		RevDB:           opts.RevDB,
+		PeerIDVersions:  opts.Config.Extensions.PeerIDVersions,
+	}
+}
+
 // configure adds peer certificate verification functions and revocation
 // database to the config.
-func (opts *Options) configure(c Config) (err error) {
-	parseOpts := peertls.ParseExtOptions{}
-
-	if c.UsePeerCAWhitelist {
+func (opts *Options) configure() (err error) {
+	if opts.Config.UsePeerCAWhitelist {
 		whitelist := []byte(DefaultPeerCAWhitelist)
-		if c.PeerCAWhitelistPath != "" {
-			whitelist, err = ioutil.ReadFile(c.PeerCAWhitelistPath)
+		if opts.Config.PeerCAWhitelistPath != "" {
+			whitelist, err = ioutil.ReadFile(opts.Config.PeerCAWhitelistPath)
 			if err != nil {
-				return Error.New("unable to find whitelist file %v: %v", c.PeerCAWhitelistPath, err)
+				return Error.New("unable to find whitelist file %v: %v", opts.Config.PeerCAWhitelistPath, err)
 			}
 		}
-		parsed, err := pkcrypto.CertsFromPEM(whitelist)
+		opts.PeerCAWhitelist, err = pkcrypto.CertsFromPEM(whitelist)
 		if err != nil {
 			return Error.Wrap(err)
 		}
-		parseOpts.CAWhitelist = parsed
-		opts.VerificationFuncs.ClientAdd(peertls.VerifyCAWhitelist(parsed))
+		opts.VerificationFuncs.ClientAdd(peertls.VerifyCAWhitelist(opts.PeerCAWhitelist))
 	}
 
-	if c.Extensions.Revocation {
-		opts.RevDB, err = identity.NewRevDB(c.RevocationDBURL)
+	if opts.Config.Extensions.Revocation {
+		opts.RevDB, err = identity.NewRevDB(opts.Config.RevocationDBURL)
 		if err != nil {
 			return err
 		}
-		opts.VerificationFuncs.Add(identity.VerifyUnrevokedChainFunc(opts.RevDB))
 	}
 
-	exts := peertls.ParseExtensions(c.Extensions, parseOpts)
-	opts.VerificationFuncs.Add(exts.VerifyFunc())
+	opts.VerificationFuncs.Add(peertls.AvailableExtensionHandlers.VerifyFunc(opts.ExtensionOptions()))
 
 	opts.Cert, err = peertls.TLSCert(opts.Ident.RawChain(), opts.Ident.Leaf, opts.Ident.Key)
 	return err
